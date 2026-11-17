@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
-"""wd_smoke v2 — nav_state_manager 纯看门狗冒烟回归（2026-10-16 复审补丁版）
+"""wd_smoke v3 — nav_state_manager 纯看门狗冒烟回归（P5 线②分级版，2026-11-17）
 
 用法（WSL / 机器人侧均可，需 ROS2 环境）：
     source /opt/ros/humble/setup.bash && python3 F1/scripts/wd_smoke_nav_state.py
     # 可选：python3 F1/scripts/wd_smoke_nav_state.py <nav_state_manager.py 绝对路径>
-    # 耗时 ~35s；节点子进程日志落 /tmp/wd_smoke_node.log（不入仓的工件）
+    # 耗时 ~40s；节点子进程日志落 /tmp/wd_smoke_node.log（不入仓的工件）
 
 ⚠️ 纪律：**每次改 nav_state_manager.py 之后必须重跑本脚本**（P0 校验 V0 的
 教训——2026-10-16 实施者留档冒烟跑的是上一次编辑的代码，最后一轮文案级
 编辑未被留档覆盖，靠校验方重跑才闭合证明链）。改判据/触发逻辑不重跑 =
 回归结论无效。
 
-相位（设计见 docs/nav/改进TODO/P0-nav-state-看门狗改造方案.md §10）：
-  1) 线② limiter 心跳源：/cmd_vel 与 /cmd_vel_limiter 零值 10Hz 流动期
-     不触发（零值=心跳，P1 等待语义不误杀）；双路沉默 >3s → burst1
-     （判定源=limiter，节点日志应写 "/cmd_vel_limiter 沉默"）
-  2) 线① + F1 re-arm：第二 goal SUCCEEDED → 0.5s 后 burst2（无任何心跳
+v2 → v3（P5 看门狗线②分级，方案 docs/nav/改进TODO/P5-遇堵先停-BT门控方案.md
+§3.2）：判据从「沉默即死」改为「按心跳源末帧值分级」，v2 相位 1/3 的期待值
+与旧契约一起作废，重排三相位：
+  A) 零末帧豁免 + 零速档兜底：双路零值 10Hz 流动期不触发（零值=心跳，P1
+     等待语义不误杀）；双路沉默 >3s **不触发**（P5 门控停等豁免——v2 旧
+     规则在 ~8.3s 会误杀，本相位专防这件事回归）；backstop 参数压到 8s
+     （spawn 时 --ros-args -p zero_silence_backstop_s:=8.0，顺带验证参数
+     接线）→ ~13s burst1（判定源=limiter，末帧零速档）
+  B) 线① + F1 re-arm：第二 goal SUCCEEDED → 0.5s 后 burst2（无任何心跳
      消息，验旧一次性缺陷已修：第二个 goal 到点必须再发 stand）
-  3) odom_bridge 死场景（P4 新覆盖）：cmd_vel 非零持续流动、limiter 沉默
-     → 3s 后 burst3——旧判据（盯 /cmd_vel）在此场景永远不触发
+  C) 链路死档保留：双路非零流动 → limiter 沉默（cmd_vel 活）→ 3s burst3
+     ——odom_bridge 死盲走保护（末帧非零档，原行为不变）
 
-断言：共 30 条 /stand_mode = 3 burst ×10（5Hz×2s），起点落位三窗口，
-零值心跳期零触发，节点兜底日志 ≥2 次指名 limiter。相位 2 会出一条
-「nav_active 已 Ns 但从未收到」WARN——已知合成噪音（驱动脚本人为拼接
-"线② 止停无终态→新 goal"序列所致，真机 goal 必有终态下降沿重置计时，
-见校验报告 F-3），非缺陷。
+断言：共 30 条 /stand_mode = 3 burst ×10；零末帧沉默期（5.0s 起）到 burst1
+前零触发（3s 豁免）；burst1 ~[12.7,14.5] / burst2 ~[20.8,22.0] / burst3
+~[32.4,34.5]；节点日志零速档/链路死文案各 ≥1、指名 limiter ≥2。
 """
 import subprocess
 import sys
@@ -102,38 +104,40 @@ def wait_to(t):
 
 
 def drive(node, done):
-    # ── 相位 1：线② limiter 心跳 ──
+    # ── 相位 A：零末帧豁免 + 零速档兜底（P5 分级，backstop 参数压到 8s）──
     wait_to(1.0)
     node.pub_walk_burst()                       # walk 事件 → in_walk + re-arm
     wait_to(2.0)
     node.pub_status_twice(GoalStatus.STATUS_EXECUTING)
-    for i in range(29):                         # 2.1→5.0 双路零值 10Hz
+    for i in range(29):                         # 2.1→4.9 双路零值 10Hz
         wait_to(2.1 + i * 0.1)
         node.pub_twist(node.cmd_pub, 0.0)
         node.pub_twist(node.lim_pub, 0.0)
-    # 5.0 起双路沉默 → 期待 ~8.3 burst1
+    # 5.0 起双路沉默（末帧=零）：>3s 不得触发（P5 门控停等豁免，v2 旧规则
+    # 会在 ~8.3s 误杀）→ backstop=8s 到点 ~13.x burst1
 
-    # ── 相位 2：线① + F1 re-arm（无心跳消息）──
-    wait_to(13.5)
-    node.pub_walk_burst()                       # re-arm
-    wait_to(14.5)
-    node.pub_status_twice(GoalStatus.STATUS_EXECUTING)
-    wait_to(15.0)
-    node.pub_status_twice(GoalStatus.STATUS_SUCCEEDED)   # → burst2 ~15.5
-
-    # ── 相位 3：odom_bridge 死（cmd_vel 活、limiter 停）──
-    wait_to(20.2)
+    # ── 相位 B：线① + F1 re-arm（无心跳消息）──
+    wait_to(19.0)                               # burst1 停止序列 ~17.5 收尾后再 re-arm
     node.pub_walk_burst()
-    wait_to(21.2)
+    wait_to(20.0)
     node.pub_status_twice(GoalStatus.STATUS_EXECUTING)
-    for i in range(21):                         # 21.2→23.2 双路流（cmd 非零）
-        wait_to(21.2 + i * 0.1)
+    wait_to(20.5)
+    node.pub_status_twice(GoalStatus.STATUS_SUCCEEDED)   # → burst2 ~21.0
+
+    # ── 相位 C：链路死档保留（limiter 末帧非零后沉默=odom_bridge 死盲走）──
+    wait_to(26.5)                               # burst2 停止序列 ~25.5 收尾后再 re-arm
+    node.pub_walk_burst()
+    wait_to(27.5)
+    node.pub_status_twice(GoalStatus.STATUS_EXECUTING)
+    for i in range(21):                         # 27.6→29.6 双路非零 10Hz
+        wait_to(27.6 + i * 0.1)
         node.pub_twist(node.cmd_pub, 0.3)
-        node.pub_twist(node.lim_pub, 0.0)
-    for i in range(70):                         # 23.2→30.2 仅 cmd_vel 活
-        wait_to(23.2 + i * 0.1)
+        node.pub_twist(node.lim_pub, 0.3)
+    for i in range(19):                         # 29.7→31.5 仅 cmd_vel 活（limiter 死）
+        wait_to(29.7 + i * 0.1)
         node.pub_twist(node.cmd_pub, 0.3)
-    # 期待 ~26.3 burst3
+    # 期待 ~32.7 burst3（limiter 末帧非零 + 沉默 >3s；cmd_vel 31.5 即停，
+    # 防停止序列收尾后被非零回声 re-arm 出第 4 个 burst）
     done.set()
 
 
@@ -143,15 +147,20 @@ def main():
         sys.exit(2)
 
     log = open(NODE_LOG, 'w')
-    proc = subprocess.Popen([sys.executable, NODE_SCRIPT],
-                            stdout=log, stderr=subprocess.STDOUT)
+    # P5 分级：backstop 参数压到 8s（零速档兜底在 40s 冒烟窗内可观测，
+    # 顺带验证 zero_silence_backstop_s 参数接线；CLI '8.0' 带小数点→float，
+    # 写 '8' 会以 int 落参、与 declare 的 double 缺省类型冲突）
+    proc = subprocess.Popen(
+        [sys.executable, NODE_SCRIPT,
+         '--ros-args', '-p', 'zero_silence_backstop_s:=8.0'],
+        stdout=log, stderr=subprocess.STDOUT)
     time.sleep(1.0)                             # 节点先起（订阅就位）
     rclpy.init()
     node = Smoke()
     done = threading.Event()
     threading.Thread(target=drive, args=(node, done), daemon=True).start()
 
-    deadline = time.monotonic() + 29.5
+    deadline = time.monotonic() + 38.5
     while time.monotonic() < deadline:
         rclpy.spin_once(node, timeout_sec=0.05)
 
@@ -187,30 +196,41 @@ def main():
         fails.append(f"burst 数 {len(bursts)} != 3")
     else:
         b1, b2, b3 = bursts
-        if not (7.0 <= b1[0] <= 9.5):
-            fails.append(f"burst1 起点 {b1[0]:.1f} 不在 [7.0,9.5]（线② 沉默触发）")
-        if not (14.9 <= b2[0] <= 16.2):
-            fails.append(f"burst2 起点 {b2[0]:.1f} 不在 [14.9,16.2]（线①+re-arm）")
-        if not (25.5 <= b3[0] <= 28.0):
-            fails.append(f"burst3 起点 {b3[0]:.1f} 不在 [25.5,28.0]（odom_bridge 死）")
+        if not (12.7 <= b1[0] <= 14.5):
+            fails.append(f"burst1 起点 {b1[0]:.1f} 不在 [12.7,14.5]"
+                         "（零速档兜底 backstop=8s）")
+        if not (20.8 <= b2[0] <= 22.0):
+            fails.append(f"burst2 起点 {b2[0]:.1f} 不在 [20.8,22.0]（线①+re-arm）")
+        if not (32.4 <= b3[0] <= 34.5):
+            fails.append(f"burst3 起点 {b3[0]:.1f} 不在 [32.4,34.5]（链路死 3s 档）")
 
-    if ev and ev[0] < 6.5:
-        fails.append(f"零值心跳期出现早期触发（{ev[0]:.1f}）——误杀")
+    # P5 豁免核心断言：零末帧沉默期（5.0 起）到 burst1 前不得出现任何触发
+    # ——v2 旧「沉默即死」规则会在 ~8.3s 误杀，本断言专防分级退化回归
+    if ev and ev[0] < 12.7:
+        fails.append(f"零末帧沉默期出现早期触发（{ev[0]:.1f}）"
+                     "——P5 分级失效（3s 规则误杀门控停等）")
 
-    # 节点日志：burst1/burst3 的兜底日志应指名 /cmd_vel_limiter 沉默
+    # 节点日志：burst1/burst3 应分别走零速档/链路死分级文案，且判定源=limiter
     logtxt = open(NODE_LOG, errors='replace').read()
-    n_limiter = logtxt.count('cmd_vel_limiter 沉默')
-    print(f"[smoke] 节点日志含 'cmd_vel_limiter 沉默' ×{n_limiter}（期待 ≥2：burst1+burst3）")
+    n_zero = logtxt.count('末帧零速后沉默')
+    n_nonzero = logtxt.count('末帧非零后沉默')
+    n_limiter = logtxt.count('cmd_vel_limiter 末帧')
+    print(f"[smoke] 节点日志：零速档 ×{n_zero}（期待 ≥1）、链路死 ×{n_nonzero}"
+          f"（期待 ≥1）、指名 limiter ×{n_limiter}（期待 ≥2：burst1+burst3）")
+    if n_zero < 1:
+        fails.append(f"日志 '末帧零速后沉默' 出现 {n_zero} 次 <1（零速档未走分级文案）")
+    if n_nonzero < 1:
+        fails.append(f"日志 '末帧非零后沉默' 出现 {n_nonzero} 次 <1（链路死档未走分级文案）")
     if n_limiter < 2:
-        fails.append(f"日志 'cmd_vel_limiter 沉默' 出现 {n_limiter} 次 <2")
+        fails.append(f"日志 'cmd_vel_limiter 末帧' 出现 {n_limiter} 次 <2（判定源应为 limiter）")
 
     if fails:
         print("[smoke] FAIL:")
         for f in fails:
             print(f"  - {f}")
         sys.exit(1)
-    print("[smoke] PASS（线②limiter 心跳不误杀 + 沉默触发 + 线①re-arm 二次触发"
-          " + odom_bridge 死场景兜底）")
+    print("[smoke] PASS（P5 线②分级：零末帧 3s 豁免 + backstop 兜底 / 非零末帧"
+          " 3s 链路死保留 + 线①re-arm 二次触发）")
 
 
 if __name__ == '__main__':

@@ -7,6 +7,8 @@
 #   - 不调用 nav_test_runner（依赖 /mujoco/ground_truth，真机没有）
 #   - 用 ros2 action send_goal 发目标；结束后自动 stand（防摔倒）
 #   - 默认不跑仿真 batch / 指标报告
+#   - 2026-11-17 起：真实导航默认经 record_nav_trial.sh 包装同步录 bag
+#     （NO_NAV_REC=1 跳过；--walk-only/--stand-only 纯切模式不录）
 #
 # 前提:
 #   1. AimRT: bash run.sh（另开终端）
@@ -28,6 +30,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAV_DIR="${ROOT_DIR}/navigation"
 SWITCH_MODE="${SCRIPT_DIR}/switch_x1_mode.sh"
+
+# ── 录包旁路（2026-11-17）：真实导航默认经 record_nav_trial.sh 包装执行 ──
+# 原样转发全部参数（含 --ready/--no-mode 等旗标）；RECORD_NAV=1 = 已在 wrapper
+# 内层（防递归）；NO_NAV_REC=1 显式跳过；wrapper 未部署时降级裸跑不碍导航。
+case "${1:-}" in
+  --walk-only|--stand-only|-h|--help|"") ;;   # 纯切模式/帮助：不录
+  *)
+    if [ $# -ge 2 ] && [ "${RECORD_NAV:-}" != "1" ] && [ "${NO_NAV_REC:-}" != "1" ] \
+       && [ -x "${SCRIPT_DIR}/record_nav_trial.sh" ]; then
+      exec env RECORD_NAV=1 bash "${SCRIPT_DIR}/record_nav_trial.sh" --no-snapshot -- "$@"
+    fi ;;
+esac
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

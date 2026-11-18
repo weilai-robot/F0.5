@@ -4,8 +4,11 @@
 #
 # 背景: 2026-11-18 换下半身前最后一个真机窗口，采「改前」基线:
 #   P6 停止轮廓 / real 刹车需求 / 旧下半身 cmd→响应跟踪 / 摔倒签名。
-#   本脚本只包装、不改 send_nav_goal_real.sh（安全 trap 逻辑原样保留）：
 #   开录 → 发目标(可人工 Ctrl+C 取消) → 续录 tail 秒(抓 NSM 兜底/摔倒余波) → 停录。
+#
+#   2026-11-17 起 send_nav_goal_real.sh 顶部有录包旁路：真实导航默认 exec 进本
+#   脚本（RECORD_NAV=1 防递归），语音线/手动发目标自动带录包。本脚本也可直调
+#   （可带人工 label，如 T3_goal_01）。
 #
 # topic 集（单 bag；刻意不录点云/costmap）:
 #   导航分析集 = record_nav_test.sh --nav 同款（11-06 goalmix045 真机实证可录）:
@@ -21,6 +24,8 @@
 #     record_nav_trial.sh T3_goal_01 -- 2.0 0.0           # 到点自然停（温柔停基线）
 #     record_nav_trial.sh T1_cancel_01 -- 2.0 0.0         # 直行巡航中人工 Ctrl+C 取消
 #     record_nav_trial.sh T2_turn_01 -- 2.0 2.0 90 120    # 转弯中取消（摔窗口姿态）
+#   record_nav_trial.sh --no-snapshot -- 2.0 0.0        # label 省略 → 自动 auto_<HHMMSS>
+#     （语音线形态：voice_agent ssh 调 send_nav_goal_real.sh → 旁路 exec 进本脚本）
 #   选项:
 #     --no-snapshot   跳过开录前快照（省 ~5s）
 #     --tail <sec>    结束后续录秒数（默认 10）
@@ -48,7 +53,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-usage() { sed -n '2,38p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,43p' "$0"; exit "${1:-0}"; }
 
 LABEL=""
 SNAPSHOT=true
@@ -68,9 +73,12 @@ while [ $# -gt 0 ]; do
        fi; shift ;;
   esac
 done
-if [ -z "${LABEL}" ] || [ ${#GOAL_ARGS[@]} -eq 0 ]; then
-  echo -e "${RED}[ERROR] 用法: record_nav_trial.sh <label> -- <goal x y [yaw] [timeout]>${NC}" >&2
+if [ ${#GOAL_ARGS[@]} -eq 0 ]; then
+  echo -e "${RED}[ERROR] 用法: record_nav_trial.sh [label] -- <goal x y [yaw] [timeout]>${NC}" >&2
   usage 1
+fi
+if [ -z "${LABEL}" ]; then
+  LABEL="auto_$(date +%H%M%S)"   # 语音线经旁路进来不带 label：自动名，台账仍可对 trial_event/视频
 fi
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -101,7 +109,8 @@ if ! command -v ros2 >/dev/null 2>&1; then
   exit 1
 fi
 
-# ── topic 存在性检查（缺只 WARN 不阻断——与 record_nav_test.sh 同口径）──
+# ── topic 存在性检查（缺只 WARN 不阻断——与 record_nav_test.sh 同口径；
+#    单次 list 缓存后本地 grep：语音线直调时省 ~5-20s 串行 ros2 调用延迟）──
 TOPICS=(
   /tf /tf_static /Odometry /odom /odom2map /localization_3d_confidence
   /cmd_vel /cmd_vel_limiter /plan
@@ -110,9 +119,10 @@ TOPICS=(
   /joint_states /imu/data /actuator_states /actuator_cmd
   /livox/imu /trial_event
 )
+TOPIC_LIST_OUT="$(ros2 topic list 2>/dev/null || true)"
 MISSING=()
 for t in "${TOPICS[@]}"; do
-  ros2 topic list 2>/dev/null | grep -qx "${t}" || MISSING+=("${t}")
+  grep -qx "${t}" <<<"${TOPIC_LIST_OUT}" || MISSING+=("${t}")
 done
 if [ ${#MISSING[@]} -gt 0 ]; then
   echo -e "${YELLOW}[WARN] 以下 topic 当前不存在（/actuator_* 常见=小脑未起或 actuator_debug 关；仍会尝试）:${NC}" >&2
@@ -171,12 +181,13 @@ if ! kill -0 "${REC_PID}" 2>/dev/null; then
   exit 1
 fi
 
-# 事件打点：手机视频开头口报同一 label，即可对齐 bag（wall 时间戳）与视频
+# 事件打点：手机视频开头口报同一 label，即可对齐 bag（wall 时间戳）与视频。
+# 后台化：pub --times 5 --rate 2 要 ~2.5s，语音线直调时不拖导航启动延迟（孤儿随脚本退出自然结束）
 pub_event() {
   ros2 topic pub --times 5 --rate 2 /trial_event std_msgs/String \
     "{data: '$1'}" >/dev/null 2>&1 || true
 }
-pub_event "start ${SAFE_LABEL}"
+pub_event "start ${SAFE_LABEL}" &
 
 if [ "${SNAPSHOT}" = true ]; then
   {
@@ -187,12 +198,16 @@ if [ "${SNAPSHOT}" = true ]; then
   } > "${RUN_DIR}/pre_snapshot.txt" 2>&1 || true
 fi
 
-# ── 跑目标（子脚本原样执行；wrapper 捕获 INT 但不转发——
-#    注意不能用 trap ''（SIG_IGN 会被子进程继承 → Ctrl+C 取消彻底失效）──
-trap 'true' INT TERM
+# ── 跑目标（子脚本原样执行；wrapper 捕获 INT/TERM/HUP 但不转发——
+#    注意不能用 trap ''（SIG_IGN 会被子进程继承 → Ctrl+C 取消彻底失效）。
+#    HUP 是语音取消路径：executor 杀本地 ssh → 远端前台进程组收 HUP →
+#    send_nav_goal_real 自己的 HUP trap 走 safe_stand 护机器人；wrapper 吞 HUP
+#    存活到收尾（end 事件/tail/notes/台账完整），不信令即超时兜底同旧路径）──
+trap 'true' INT TERM HUP
 echo -e "${GREEN}[trial] ── 开跑: send_nav_goal_real.sh ${GOAL_ARGS[*]} ──（人在旁护着）${NC}"
 set +e
-bash "${SCRIPT_DIR}/send_nav_goal_real.sh" "${GOAL_ARGS[@]}"
+# RECORD_NAV=1：告诉 send_nav_goal_real 已在 wrapper 内层，别再 exec 回来（防递归）
+RECORD_NAV=1 bash "${SCRIPT_DIR}/send_nav_goal_real.sh" "${GOAL_ARGS[@]}"
 RC=$?
 set +e   # 本脚本全程无 -e：取消/超时 rc≠0 是正常路径，后续收尾不许中断
 
@@ -225,3 +240,5 @@ printf '%s,%s,"%s",%s,,,,\n' "$(date +%Y%m%d_%H%M%S)" "${SAFE_LABEL}" "${GOAL_AR
 echo -e "${GREEN}[trial] 完成${NC}"
 echo "  目录: ${RUN_DIR}"
 echo "  请填: ${RUN_DIR}/notes.md（摔/距墙/视频编号）+ 台账 ${LOG_CSV}"
+# 语音线直调依赖 RC 语义（0=ok/124=timeout/其他=fail）：透传 send_nav_goal_real 的 RC
+exit "${RC}"

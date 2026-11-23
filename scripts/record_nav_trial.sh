@@ -6,8 +6,8 @@
 #   P6 停止轮廓 / real 刹车需求 / 旧下半身 cmd→响应跟踪 / 摔倒签名。
 #   开录 → 发目标(可人工 Ctrl+C 取消) → 续录 tail 秒(抓 NSM 兜底/摔倒余波) → 停录。
 #
-#   2026-11-17 起 send_nav_goal_real.sh 顶部有录包旁路：真实导航默认 exec 进本
-#   脚本（RECORD_NAV=1 防递归），语音线/手动发目标自动带录包。本脚本也可直调
+#   2026-11-23 起 send_nav_goal_real.sh 录包改显式参数：带 --record 才 exec 进本
+#   脚本（RECORD_NAV=1 防递归），label 自动 auto_<HHMMSS>；本脚本也可直调
 #   （可带人工 label，如 T3_goal_01）。
 #
 # topic 集（单 bag；刻意不录点云/costmap）:

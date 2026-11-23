@@ -194,7 +194,7 @@ if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
 fi
 
 # --- 每个窗口的 source 前缀 ---
-TMUX_SOURCE="source /home/robot/miniconda/etc/profile.d/conda.sh && conda deactivate >/dev/null 2>&1 || true && conda activate nav && source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
+TMUX_SOURCE="source /home/robot/miniconda3/etc/profile.d/conda.sh && conda deactivate >/dev/null 2>&1 || true && conda activate nav && source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
 
 # 域前缀（ROS_DOMAIN_ID 设置时注入每个 tmux 窗口，勿串人类默认域 0；navsim 补丁锚点依赖上一行 TMUX_SOURCE 原样）
 DOMAIN_EXPORT=""

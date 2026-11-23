@@ -107,10 +107,21 @@ fi
 echo -e "\033[0;32m✓ Navigation ROS2 packages 构建成功\033[0m"
 
 # ── 2. MuJoCo-LiDAR (pip package, 仅仿真用) ──────────────
+# 共享 conda 环境保护: 全服所有工作区的 sim 共用 nav 环境里这一份 mujoco_lidar
+# editable。若它已指向别处(别的工作区 / CI runner checkout), 默认跳过本步,
+# 防止编译动作悄悄改写共享环境(此前 CI 在 runner checkout 构建时正是这样把
+# editable 拉走的)。确要切到本工作区请显式: FORCE_MUJOCO_LIDAR=1 ./build_nav.sh
 if [ -d sim/MuJoCo-LiDAR ]; then
-    echo -e "\033[0;32m[build_nav] 安装 MuJoCo-LiDAR (pip)...\033[0m"
-    pip install -e sim/MuJoCo-LiDAR 2>/dev/null || \
-        echo -e "\033[0;33m  ⚠ MuJoCo-LiDAR pip install 跳过\033[0m"
+    ED_LOC="$(pip show mujoco_lidar 2>/dev/null | sed -n 's/^Editable project location: //p')"
+    if [ -n "${ED_LOC}" ] && [ "${ED_LOC}" != "${NAV_DIR}/sim/MuJoCo-LiDAR" ] && [ -z "${FORCE_MUJOCO_LIDAR}" ]; then
+        echo -e "\033[0;33m  ⚠ MuJoCo-LiDAR editable 已指向 ${ED_LOC}\033[0m"
+        echo -e "\033[0;33m    (共享 conda nav 环境, 其他工作区/CI 在用) → 跳过 pip install -e\033[0m"
+        echo -e "\033[0;33m    确要切到本工作区: FORCE_MUJOCO_LIDAR=1 bash scripts/build_nav.sh\033[0m"
+    else
+        echo -e "\033[0;32m[build_nav] 安装 MuJoCo-LiDAR (pip)...\033[0m"
+        pip install -e sim/MuJoCo-LiDAR 2>/dev/null || \
+            echo -e "\033[0;33m  ⚠ MuJoCo-LiDAR pip install 跳过\033[0m"
+    fi
 fi
 
 echo ""

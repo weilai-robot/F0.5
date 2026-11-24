@@ -20,6 +20,10 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAV_DIR="${ROOT_DIR}/navigation"
 BUILD_DIR="${ROOT_DIR}/build"
 SESSION_NAME="f1_sim_nav"
+# 人侧域钉: 下面三处 pane 前缀统一引用此变量(0=人类默认域), 显式盖过 tmux server
+# 全局 env 的残留串域(2026-11-24 事故根因); navsim 补丁按行替换此赋值——
+# 注意: 本文件任何位置(含注释)勿复述赋值串字面量, 否则补丁锚点计数≠1 会拒启。
+ROS_DOMAIN_PIN="0"
 
 # --- 颜色 ---
 RED='\033[0;31m'
@@ -168,14 +172,14 @@ fi
 
 # --- 每个窗口的 source 前缀 ---
 # TMUX_SOURCE="source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
-TMUX_SOURCE="source /home/robot/miniconda/etc/profile.d/conda.sh && conda deactivate >/dev/null 2>&1 || true && conda activate nav && source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
+TMUX_SOURCE="export ROS_DOMAIN_ID=${ROS_DOMAIN_PIN}; source /home/robot/miniconda/etc/profile.d/conda.sh && conda deactivate >/dev/null 2>&1 || true && conda activate nav && source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
 
 # --- [窗口 0] aimrt_main (运动控制 + 物理仿真) ---
 tmux new-session -d -s "${SESSION_NAME}" -n "aimrt"
 SESSION_CREATED=1
 echo -e "${GREEN}  [0] aimrt_main (sim_x1_nav.yaml)${NC}"
 tmux send-keys -t "${SESSION_NAME}:0" \
-    "cd ${BUILD_DIR} && source install/share/ros2_plugin_proto/local_setup.bash 2>/dev/null; ./aimrt_main --cfg_file_path=./cfg/x1_cfg_sim_nav.yaml" Enter
+    "export ROS_DOMAIN_ID=${ROS_DOMAIN_PIN}; cd ${BUILD_DIR} && source install/share/ros2_plugin_proto/local_setup.bash 2>/dev/null; ./aimrt_main --cfg_file_path=./cfg/x1_cfg_sim_nav.yaml" Enter
 
 echo -e "${YELLOW}  等待 aimrt_main + MuJoCo 渲染窗口启动 (5s)...${NC}"
 sleep 5
@@ -246,7 +250,7 @@ sleep 2
 # --- [窗口 8] 测试数据采集 (rosbag + pidstat) ---
 tmux new-window -t "${SESSION_NAME}" -n "record"
 echo -e "${GREEN}  [record] 测试数据采集 (手动启动)${NC}"
-tmux send-keys -t "${SESSION_NAME}:record" "source ${ROS_SETUP_BASH}" Enter
+tmux send-keys -t "${SESSION_NAME}:record" "export ROS_DOMAIN_ID=${ROS_DOMAIN_PIN}; source ${ROS_SETUP_BASH}" Enter
 tmux send-keys -t "${SESSION_NAME}:record" \
     "echo '=== 导航测试数据采集 ===\n  录制 bag: ros2 bag record /mujoco/ground_truth /cmd_vel /cmd_vel_limiter /Odometry /tf -o test_run_NNN\n  CPU/内存: pidstat -ru 1 -C \"aimrt_main|mujoco_lidar_bridge|fastlio|open3d_loc|nav2\" > cpu_mem.log\n  实时监控: ros2 topic echo /mujoco/ground_truth --once'" Enter
 

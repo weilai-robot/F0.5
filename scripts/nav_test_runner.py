@@ -20,6 +20,13 @@ nav_test_runner.py — 导航仿真自动化测试 + 指标计算
 
 Ctrl+C: 中断后仍会把已采集数据写入上述目录 (result_status=INTERRUPTED)。
 
+尾录 (--tail-record-s, 默认 5s): Nav2 结果到达后继续采集, 捕获停后摔倒等
+  延伸事件 (family① stop→lunge)。指标按锁终帧 (terminal_gt_idx) 切片计算,
+  与不尾录时口径一致、批次可比; 摔倒/碰撞故意跨尾录窗延伸 (尾录内摔倒会
+  把 fall 置 True / success 置 False — 这就是本功能的目的)。
+  尾录专属字段: tail_record_s (实际尾录时长), settled_pos_err_m (尾录末帧
+  落点误差), fall_after_result (摔倒发生在结果到达之后)。
+
 指标:
   P0: 摔倒率, 碰撞次数
   P1: 导航成功率, 位置精度, SLAM漂移
@@ -77,6 +84,8 @@ class MetricsCalculator:
         self.first_motion_time = None  # 首次检测到非零 cmd_vel 的时刻
         self.end_time = None
         self.fall_detected = False
+        self.first_fall_idx = None   # 首个摔倒帧下标 (区分结果前/后摔倒)
+        self.terminal_gt_idx = None  # 结果到达时锁定的 GT 帧数 (尾录延伸帧不进指标)
         self.collision_total = 0
         self.max_rtf = 0.0
         self.min_rtf = 1e9
@@ -91,6 +100,8 @@ class MetricsCalculator:
         pitch = abs(data[5])
         if z < self.FALL_Z_THRESHOLD or roll > self.FALL_ANGLE_THRESHOLD or pitch > self.FALL_ANGLE_THRESHOLD:
             self.fall_detected = True
+            if self.first_fall_idx is None:
+                self.first_fall_idx = len(self.gt_data) - 1
 
         # 累计碰撞
         self.collision_total = max(self.collision_total, data[8])
@@ -124,6 +135,20 @@ class MetricsCalculator:
         """计算全部指标"""
         m = {}
 
+        # ── 尾录锁帧: 结果到达 (terminal_gt_idx) 之后的延伸帧只参与摔倒/碰撞检测,
+        #    完成时间/位置误差/路径效率/漂移/速度/RTF 一律按锁帧切片计算,
+        #    与不尾录时口径一致 (批次可比) ──
+        if self.terminal_gt_idx is not None and 0 < self.terminal_gt_idx < len(self.gt_data):
+            term_gt = self.gt_data[:self.terminal_gt_idx]
+            term_sim_t = term_gt[-1][0]
+            term_odom = [d for d in self.odom_paired_data if d[0] <= term_sim_t]
+            term_cmd = [d for d in self.cmd_vel_data
+                        if self.end_time is None or d[0] <= self.end_time]
+        else:
+            term_gt = self.gt_data
+            term_odom = self.odom_paired_data
+            term_cmd = self.cmd_vel_data
+
         # === P0: 摔倒 + 碰撞 ===
         m["fall"] = self.fall_detected
         m["collisions"] = int(self.collision_total)
@@ -134,7 +159,7 @@ class MetricsCalculator:
             m["error_reason"] = "no_ground_truth_data"
             return m
 
-        final_gt = self.gt_data[-1]
+        final_gt = term_gt[-1]
         final_x, final_y = final_gt[1], final_gt[2]
         goal_dist = math.sqrt((final_x - goal_x)**2 + (final_y - goal_y)**2)
 
@@ -148,9 +173,9 @@ class MetricsCalculator:
             m["plan_time_s"] = None
 
         # === 定位精度: 逐帧 GT vs odom 漂移统计 ===
-        if len(self.odom_paired_data) > 0:
+        if len(term_odom) > 0:
             import numpy as np
-            drifts = np.array([d[5] for d in self.odom_paired_data])
+            drifts = np.array([d[5] for d in term_odom])
             m["drift_mean_m"] = round(float(drifts.mean()), 4)
             m["drift_rms_m"] = round(float(np.sqrt((drifts**2).mean())), 4)
             m["drift_max_m"] = round(float(drifts.max()), 4)
@@ -167,16 +192,16 @@ class MetricsCalculator:
 
         # === P2: 完成时间/路径效率/jerk ===
         if self.start_time and self.end_time:
-            sim_duration = self.gt_data[-1][0] - self.gt_data[0][0] if len(self.gt_data) > 1 else 0
+            sim_duration = term_gt[-1][0] - term_gt[0][0] if len(term_gt) > 1 else 0
             m["completion_time_s"] = round(sim_duration, 2)
         else:
             m["completion_time_s"] = None
 
         # 路径效率: 直线距离 / 本 trial 内累计位移(非仿真终身累计)
-        if len(self.gt_data) >= 2:
-            start_x, start_y = self.gt_data[0][1], self.gt_data[0][2]
+        if len(term_gt) >= 2:
+            start_x, start_y = term_gt[0][1], term_gt[0][2]
             straight_dist = math.sqrt((goal_x - start_x)**2 + (goal_y - start_y)**2)
-            first_cum = self.gt_data[0][9]
+            first_cum = term_gt[0][9]
             trial_dist = final_gt[9] - first_cum  # BUG-1 修: 本 trial 窗口内的位移, 非终身累计
             if trial_dist > 0.01:
                 eff = straight_dist / trial_dist
@@ -187,21 +212,21 @@ class MetricsCalculator:
             m["path_efficiency"] = None
 
         # 速度 jerk
-        jerk_stats = self._compute_jerk()
+        jerk_stats = self._compute_jerk(term_cmd)
         m["linear_jerk_rms"] = jerk_stats["linear_rms"]
         m["angular_jerk_rms"] = jerk_stats["angular_rms"]
         m["direction_reversals_per_sec"] = jerk_stats["reversal_rate"]
 
         # === 速度统计: 从 GT 轨迹差分 ===
-        v_stats = self._compute_velocity_stats()
+        v_stats = self._compute_velocity_stats(term_gt)
         m.update(v_stats)
 
         # === 转弯半径: 从 GT 轨迹曲率 ===
-        m["turning_radius_min_m"] = self._compute_min_turning_radius()
+        m["turning_radius_min_m"] = self._compute_min_turning_radius(term_gt)
 
         # === 性能 ===
-        if self.gt_data:
-            rtfs = [g[7] for g in self.gt_data if g[7] > 0]
+        if term_gt:
+            rtfs = [g[7] for g in term_gt if g[7] > 0]
             if rtfs:
                 m["rtf_mean"] = round(sum(rtfs) / len(rtfs), 3)
                 m["rtf_min"] = round(min(rtfs), 3)
@@ -214,6 +239,20 @@ class MetricsCalculator:
 
         m["timeout_s"] = timeout_sec
         m["timed_out"] = (m.get("completion_time_s") or 0) >= timeout_sec * 0.95
+
+        # ── 尾录专属字段 (延伸窗数据, 不参与上方指标口径) ──
+        m["fall_after_result"] = bool(
+            self.first_fall_idx is not None
+            and self.terminal_gt_idx is not None
+            and self.first_fall_idx >= self.terminal_gt_idx)
+        if self.terminal_gt_idx is not None and self.terminal_gt_idx < len(self.gt_data):
+            m["tail_record_s"] = round(self.gt_data[-1][0] - term_gt[-1][0], 2)
+            settled = self.gt_data[-1]
+            m["settled_pos_err_m"] = round(
+                math.sqrt((settled[1] - goal_x)**2 + (settled[2] - goal_y)**2), 3)
+        else:
+            m["tail_record_s"] = None
+            m["settled_pos_err_m"] = None
 
         return m
 
@@ -291,7 +330,13 @@ class MetricsCalculator:
                     break
         # Nav2 结果
         if result_status:
-            end_t = self.gt_data[-1][0] if self.gt_data else 0
+            # 结果事件标在锁终帧 (尾录延伸帧不属于导航过程)
+            if self.gt_data and self.terminal_gt_idx:
+                end_t = self.gt_data[self.terminal_gt_idx - 1][0]
+            elif self.gt_data:
+                end_t = self.gt_data[-1][0]
+            else:
+                end_t = 0
             events.append({"t": round(end_t, 2), "type": "nav_result",
                            "desc": result_status})
 
@@ -326,19 +371,20 @@ class MetricsCalculator:
 
         return diag
 
-    def _compute_velocity_stats(self) -> dict:
-        """从 GT 轨迹逐帧差分计算实际线速度统计"""
-        if len(self.gt_data) < 3:
+    def _compute_velocity_stats(self, gt_data=None) -> dict:
+        """从 GT 轨迹逐帧差分计算实际线速度统计 (gt_data=None 用全量, 供锁帧切片传入)"""
+        gt = gt_data if gt_data is not None else self.gt_data
+        if len(gt) < 3:
             return {"vmax_m_s": None, "vmin_m_s": None,
                     "vmean_m_s": None, "vstd_m_s": None}
 
         velocities = []
-        for i in range(1, len(self.gt_data)):
-            dt = self.gt_data[i][0] - self.gt_data[i-1][0]
+        for i in range(1, len(gt)):
+            dt = gt[i][0] - gt[i-1][0]
             if dt < 1e-6:
                 continue
-            dx = self.gt_data[i][1] - self.gt_data[i-1][1]
-            dy = self.gt_data[i][2] - self.gt_data[i-1][2]
+            dx = gt[i][1] - gt[i-1][1]
+            dy = gt[i][2] - gt[i-1][2]
             v = math.sqrt(dx*dx + dy*dy) / dt
             velocities.append(v)
 
@@ -355,16 +401,17 @@ class MetricsCalculator:
             "vstd_m_s": round(float(v_arr.std()), 3),
         }
 
-    def _compute_min_turning_radius(self):
-        """从 GT 轨迹三点法计算最小转弯半径 (外接圆法)"""
-        if len(self.gt_data) < 3:
+    def _compute_min_turning_radius(self, gt_data=None):
+        """从 GT 轨迹三点法计算最小转弯半径 (外接圆法; gt_data=None 用全量)"""
+        gt = gt_data if gt_data is not None else self.gt_data
+        if len(gt) < 3:
             return None
 
         min_radius = float('inf')
-        for i in range(1, len(self.gt_data) - 1):
-            x1, y1 = self.gt_data[i-1][1], self.gt_data[i-1][2]
-            x2, y2 = self.gt_data[i][1],   self.gt_data[i][2]
-            x3, y3 = self.gt_data[i+1][1], self.gt_data[i+1][2]
+        for i in range(1, len(gt) - 1):
+            x1, y1 = gt[i-1][1], gt[i-1][2]
+            x2, y2 = gt[i][1],   gt[i][2]
+            x3, y3 = gt[i+1][1], gt[i+1][2]
 
             # 三角形边长
             a = math.sqrt((x2-x3)**2 + (y2-y3)**2)
@@ -389,14 +436,15 @@ class MetricsCalculator:
 
         return round(min_radius, 2) if min_radius != float('inf') else None
 
-    def _compute_jerk(self) -> dict:
-        """从 cmd_vel 时间序列计算 jerk"""
-        if len(self.cmd_vel_data) < 3:
+    def _compute_jerk(self, cmd_data=None) -> dict:
+        """从 cmd_vel 时间序列计算 jerk (cmd_data=None 用全量, 供锁帧切片传入)"""
+        cmd = cmd_data if cmd_data is not None else self.cmd_vel_data
+        if len(cmd) < 3:
             return {"linear_rms": None, "angular_rms": None, "reversal_rate": None}
 
-        times = [d[0] for d in self.cmd_vel_data]
-        vxs = [d[1] for d in self.cmd_vel_data]
-        wzs = [d[3] for d in self.cmd_vel_data]
+        times = [d[0] for d in cmd]
+        vxs = [d[1] for d in cmd]
+        wzs = [d[3] for d in cmd]
 
         # jerk = d(acceleration)/dt ≈ Δ(Δv/Δt)/Δt
         linear_jerks = []
@@ -452,6 +500,7 @@ class NavTestNode(Node):
         self.timeout_sec = timeout_sec
         self.metrics = MetricsCalculator()
         self.finished = False
+        self.stop_requested = False  # Ctrl+C/SIGTERM 置位: 尾录窗内也要能立即截断
         self.result_status = None
         self._cmd_vel_received = False
 
@@ -542,6 +591,7 @@ class NavTestNode(Node):
         if not goal_handle.accepted:
             self.get_logger().error("Nav2 拒绝了目标")
             self.result_status = "REJECTED"
+            self.metrics.terminal_gt_idx = len(self.metrics.gt_data)
             self.finished = True
             return
         self.get_logger().info("Nav2 接受目标，导航中...")
@@ -556,6 +606,8 @@ class NavTestNode(Node):
         else:
             self.get_logger().warn(f"Nav2 报告失败 (status={status})")
             self.result_status = f"FAILED_{status}"
+        # 锁终帧: 此刻的 GT 帧数即指标口径边界, 之后的尾录延伸帧只做摔倒/碰撞检测
+        self.metrics.terminal_gt_idx = len(self.metrics.gt_data)
         self.metrics.end_time = time.monotonic()
         self.finished = True
 
@@ -862,6 +914,7 @@ def run_single_test(scenario_name: str, params: dict, report_dir: str) -> dict:
 
     # Ctrl+C / SIGTERM → 标记结束，走正常落盘路径 (不抛 KeyboardInterrupt 丢数据)
     def _request_stop(status: str):
+        node.stop_requested = True  # 无条件置位 (即使已 finished, 也要能截断进行中的尾录)
         if not node.finished:
             print(f"\n  ⚠ {status} — 中断采集，正在保存已有数据...")
             node.result_status = status
@@ -910,6 +963,18 @@ def run_single_test(scenario_name: str, params: dict, report_dir: str) -> dict:
                     print(f"\r  sim_t={sim_t:.1f}s  pos=({cx:.2f},{cy:.2f})  dist={dist:.2f}m  wall={elapsed_wall:.0f}s",
                           end="", flush=True)
             print()
+
+            # 尾录: 结果已到, 继续采集 tail_record_s 秒, 捕获停后摔倒等延伸事件
+            # (family① stop→lunge 在结果后 0.6~2s)。指标按锁终帧计算不受影响;
+            # 摔倒/碰撞故意延伸 — 尾录内摔倒会把 fall 置 True / success 置 False。
+            # Ctrl+C/SIGTERM (stop_requested) 立即截断尾录, 不吞中断。
+            tail_s = params.get("tail_record_s", 0.0)
+            if tail_s > 0 and not node.stop_requested and node.metrics.goal_sent_time is not None:
+                print(f"[3.5/4] 结果已到 ({node.result_status}), 尾录 {tail_s:.0f}s (捕获停后摔倒等事件)...")
+                tail_wall_end = time.monotonic() + tail_s
+                while time.monotonic() < tail_wall_end and not node.stop_requested:
+                    rclpy.spin_once(node, timeout_sec=0.5)
+                print()
     except KeyboardInterrupt:
         # 极少情况: 信号处理器未接管时兜底
         _request_stop("INTERRUPTED")
@@ -992,6 +1057,8 @@ def main():
     parser.add_argument("--goal-y", type=float, default=0.0, help="目标 Y (m)")
     parser.add_argument("--goal-yaw", type=float, default=0.0, help="目标朝向 (rad)")
     parser.add_argument("--timeout", type=float, default=120, help="超时 (s)")
+    parser.add_argument("--tail-record-s", dest="tail_record_s", type=float, default=5.0,
+                        help="结果到达后的尾录时长 (s), 捕获停后摔倒等延伸事件; 0 关闭")
     parser.add_argument("--scenario", type=str, default=None,
                         help="预定义场景名 (A_straight_5m, C_narrow_passage, ...)")
     parser.add_argument("--batch", action="store_true", help="批量运行所有场景")
@@ -1009,6 +1076,7 @@ def main():
             print(f"\n{'#'*60}")
             print(f"# 批量测试: {name}")
             print(f"{'#'*60}")
+            params["tail_record_s"] = args.tail_record_s
 
             result = run_single_test(name, params, report_dir)
             all_results.append(result)
@@ -1050,6 +1118,7 @@ def main():
             print(f"可用: {', '.join(SCENARIOS.keys())}")
             sys.exit(1)
         params = SCENARIOS[args.scenario]
+        params["tail_record_s"] = args.tail_record_s
         run_single_test(args.scenario, params, report_dir)
 
     else:
@@ -1060,6 +1129,7 @@ def main():
             "goal_y": args.goal_y,
             "goal_yaw": args.goal_yaw,
             "timeout": int(args.timeout),
+            "tail_record_s": args.tail_record_s,
         }
         run_single_test("custom", params, report_dir)
 

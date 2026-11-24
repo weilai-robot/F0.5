@@ -34,9 +34,9 @@ launch_cleanup() {
     echo ""
     echo -e "${RED}[FAIL] 启动中断 (rc=${rc}).${NC}" >&2
     echo -e "${YELLOW}  tmux session ${SESSION_NAME} 可能仍在运行，可先排查现场:${NC}" >&2
-    echo -e "${YELLOW}    tmux attach -t ${SESSION_NAME}${NC}" >&2
+    echo -e "${YELLOW}    tmux attach -t =${SESSION_NAME}${NC}" >&2
     echo -e "${YELLOW}  排查完后清理:${NC}" >&2
-    echo -e "${YELLOW}    tmux kill-session -t ${SESSION_NAME}${NC}" >&2
+    echo -e "${YELLOW}    tmux kill-session -t =${SESSION_NAME}${NC}" >&2
   fi
 }
 trap launch_cleanup EXIT
@@ -160,9 +160,9 @@ if [ ! -f "$MODEL_PATH" ]; then
 fi
 
 # --- 检查是否已有同名 session ---
-if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+if tmux has-session -t "=${SESSION_NAME}" 2>/dev/null; then
     echo -e "${YELLOW}[WARN] 已存在 tmux session: ${SESSION_NAME}${NC}"
-    echo -e "  关闭: tmux kill-session -t ${SESSION_NAME}"
+    echo -e "  关闭: tmux kill-session -t =${SESSION_NAME}"
     exit 1
 fi
 
@@ -268,8 +268,8 @@ echo "   leg_odom        - (已注释/当前不启用)"
 echo "   record          - 测试数据采集 (rosbag + pidstat)（窗口index随配置变化）"
 echo ""
 echo " 切换窗口: Ctrl+B 然后 数字键"
-echo " 附加终端: tmux attach -t ${SESSION_NAME}"
-echo " 关闭全部: tmux kill-session -t ${SESSION_NAME}"
+echo " 附加终端: tmux attach -t =${SESSION_NAME}"
+echo " 关闭全部: tmux kill-session -t =${SESSION_NAME}"
 echo ""
 echo -e "${YELLOW} 操作流程:${NC}"
 echo -e "   1. 在 MuJoCo 窗口中确认机器人已加载"

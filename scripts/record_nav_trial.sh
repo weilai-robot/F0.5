@@ -37,7 +37,7 @@
 # 输出: F1/reports/nav_test_record/<ts>_<label>/
 #     bag/  recorder.log  qos_override.yaml  pre_snapshot.txt  bag_info.txt  notes.md
 #     并向 reports/nav_test_record/trial_log.csv 追加一行（人工列留空待填）
-# 离线: python3 scripts/bag_analyze.py <bag目录> --goal X Y YAW
+# 离线: python3 navigation/tools/bag_analyze.py <bag目录> --goal X Y YAW
 #
 # Ctrl+C 语义: 一次 = 取消导航（send_nav_goal_real 内部 → CANCEL → safe_stand），
 #   录包不停，+tail 秒后自动收尾；tail 期间再按一次 = 跳过 tail 立即停录。

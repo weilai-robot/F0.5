@@ -128,7 +128,7 @@ cat >"${RUN_DIR}/README.md" <<EOF
 ## 指标提取
 
 \`\`\`bash
-python3 scripts/bag_analyze.py reports/nav_pull/${STAMP}_${LABEL}/reports/nav_test_record/*/bag --goal <X> <Y> <YAW> --dump-timeline /tmp/tl
+python3 navigation/tools/bag_analyze.py reports/nav_pull/${STAMP}_${LABEL}/reports/nav_test_record/*/bag --goal <X> <Y> <YAW> --dump-timeline /tmp/tl
 \`\`\`
 
 ## 看什么（11-03 教训对照）

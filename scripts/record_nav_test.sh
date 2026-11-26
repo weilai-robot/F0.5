@@ -13,7 +13,7 @@
 #   ./record_nav_test.sh --nav --full -d 0 push  # --full 另加 livox 原始数据+costmap（体积大）
 #
 # 指标提取（录完离线跑，零 ROS 依赖）:
-#   python3 scripts/bag_analyze.py <bag目录> --goal X Y YAW
+#   python3 navigation/tools/bag_analyze.py <bag目录> --goal X Y YAW
 #
 # 输出:
 #   F1/reports/nav_test_record/<timestamp>_<label>/
@@ -213,7 +213,7 @@ ros2 topic echo /localization_3d_confidence
 ## 指标提取（离线）
 
 \`\`\`bash
-python3 scripts/bag_analyze.py ${BAG_NAME} --goal <X> <Y> <YAW>
+python3 navigation/tools/bag_analyze.py ${BAG_NAME} --goal <X> <Y> <YAW>
 \`\`\`
 EOF
 

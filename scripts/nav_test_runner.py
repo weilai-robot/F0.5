@@ -685,6 +685,9 @@ def format_report(scenario_name: str, scenario_desc: str, params: dict,
         f"| **碰撞** | {metrics.get('collisions', '?')} 次 | {collision_icon} | robot vs environment (排除地面) |",
         f"| **导航成功** | {'是' if metrics.get('success') else '否'} | {status_icon} | 未摔未撞且距离<0.35m |",
         f"| **位置误差** | {metrics.get('position_error_m', '?')} m | {PASS if (metrics.get('position_error_m') is not None and metrics['position_error_m'] < 0.35) else FAIL} | 真实位置 vs 目标 |",
+        # 稳定后误差=尾录结束(result+尾录窗)时刻 GT 距离：与判成功距离对比可看
+        # 缓降滑行/到达后摔倒的最终落点（102124/130205 系列），信息项不判定
+        f"| **稳定后误差** | {metrics['settled_pos_err_m'] if metrics.get('settled_pos_err_m') is not None else 'N/A'} m | — | 尾录结束真实位置 vs 目标（result+{metrics.get('tail_record_s') or 5}s） |",
         f"| **SLAM漂移** | mean={metrics.get('drift_mean_m', 'N/A')}m max={metrics.get('drift_max_m', 'N/A')}m p95={metrics.get('drift_p95_m', 'N/A')}m | {WARN if metrics.get('drift_mean_m', 0) and metrics.get('drift_mean_m', 0) > 0.3 else PASS} | FastLIO2 估计 vs ground truth (逐帧) |",
         f"| **规划时间** | {metrics.get('plan_time_s', 'N/A')} s | — | goal发出 → 首次有速度输出 |",
         f"| **完成时间** | {metrics.get('completion_time_s', '?')} s | — | sim_time |",
@@ -1027,6 +1030,8 @@ def run_single_test(scenario_name: str, params: dict, report_dir: str) -> dict:
     print(f"  摔倒: {'是' if metrics.get('fall') else '否'}")
     print(f"  碰撞: {metrics.get('collisions', '?')} 次")
     print(f"  位置误差: {metrics.get('position_error_m', '?')} m")
+    if metrics.get('settled_pos_err_m') is not None:
+        print(f"  稳定后误差: {metrics['settled_pos_err_m']} m (尾录结束 result+{metrics.get('tail_record_s') or 5}s)")
     print(f"  SLAM漂移: mean={metrics.get('drift_mean_m', 'N/A')}m max={metrics.get('drift_max_m', 'N/A')}m")
     print(f"  规划时间: {metrics.get('plan_time_s', 'N/A')}s")
     print(f"  路径效率: {metrics.get('path_efficiency', 'N/A')}")

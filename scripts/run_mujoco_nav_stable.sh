@@ -174,7 +174,7 @@ fi
 
 # --- 每个窗口的 source 前缀 ---
 # TMUX_SOURCE="source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
-TMUX_SOURCE="source /home/robot/env/miniconda/etc/profile.d/conda.sh && conda deactivate >/dev/null 2>&1 || true && conda activate nav && source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
+TMUX_SOURCE="source /home/robot/miniconda3/etc/profile.d/conda.sh && conda deactivate >/dev/null 2>&1 || true && conda activate nav && source ${ROS_SETUP_BASH} && source ${NAV_DIR}/install/setup.bash"
 
 wait_for_topic_once() {
     local topic="$1"
